@@ -8,3 +8,4 @@ install*.py
 test_model.py
 models/
 aquifer_data/
+.idea/
