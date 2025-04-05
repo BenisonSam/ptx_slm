@@ -1,9 +1,10 @@
 import os
 import re
 import time
+from threading import Thread
+
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer
-from threading import Thread
 
 # Configuration
 PERFORMANCE_MODE = True  # Set to True for maximum performance, False for memory optimization
@@ -16,11 +17,8 @@ model_name = "Qwen/Qwen2.5-1.5B-Instruct"
 device = torch.device("cuda" if PERFORMANCE_MODE and torch.cuda.is_available() else "cpu")
 
 # Create a directory name from the model name (replacing / with _)
-model_dir = os.path.join("models", re.sub(r'[^a-zA-Z0-9\-/]', '_', model_name))
-model_dir = os.path.abspath(model_dir)
-
-# Check if model files exist
-model_path = os.path.join(model_dir)
+model_path = os.path.join("models", re.sub(r'[^a-zA-Z0-9\-/]', '_', model_name))
+model_path = os.path.abspath(model_path)
 
 # Determine device and optimization settings based on performance mode
 performance_mode = PERFORMANCE_MODE
@@ -28,24 +26,23 @@ device = "cuda" if performance_mode and torch.cuda.is_available() else "cpu"
 print(f"Device set to use {device}")
 
 # Download and save model if it doesn't exist
-should_download = not os.path.exists(model_path)
+get_model = not os.path.exists(model_path)
 
 # Create models directory if it doesn't exist
-os.makedirs(model_dir, exist_ok=True)
+os.makedirs(model_path, exist_ok=True)
 
-print(f"{'Downl' if should_download else 'L'}oading model {'to' if should_download else 'from'} {model_path}...")
+print(f"{'Downl' if get_model else 'L'}oading model {'to' if get_model else 'from'} {model_path}...")
 model = AutoModelForCausalLM.from_pretrained(
-    model_name if should_download else model_path,
+    model_name if get_model else model_path,
     torch_dtype=torch.float16 if device == "cuda" else torch.float32,
     device_map="auto" if device == "cuda" else None,
     low_cpu_mem_usage=True,
 )
 
-tokenizer = AutoTokenizer.from_pretrained(model_name if should_download else model_path)
-if should_download:
+tokenizer = AutoTokenizer.from_pretrained(model_name if get_model else model_path)
+if get_model:
     model.save_pretrained(model_path)
     tokenizer.save_pretrained(model_path)
-
 
 # Default model kwargs and generation kwargs
 model_kwargs = {
@@ -76,9 +73,11 @@ prompt = "What is the role of textual criticism?"
 messages = [
     {"role": "system", "content": "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."},
     {"role": "user", "content": "Can you explain what textual criticism is?"},
-    {"role": "assistant", "content": "Textual criticism is the study of manuscripts and their variations to determine the most accurate version of a text. It's particularly important in biblical studies."},
+    {"role": "assistant",
+     "content": "Textual criticism is the study of manuscripts and their variations to determine the most accurate version of a text. It's particularly important in biblical studies."},
     {"role": "user", "content": "What are its main goals?"},
-    {"role": "assistant", "content": "The main goals of textual criticism are to identify and correct errors in texts, reconstruct the original text, and understand the history of its transmission."},
+    {"role": "assistant",
+     "content": "The main goals of textual criticism are to identify and correct errors in texts, reconstruct the original text, and understand the history of its transmission."},
     {"role": "user", "content": prompt},
 ]
 text = tokenizer.apply_chat_template(
@@ -89,7 +88,7 @@ text = tokenizer.apply_chat_template(
 model_inputs = tokenizer([text], return_tensors="pt").to(device)
 
 # Skip the prompt
-skip_prompt=False
+skip_prompt = False
 
 # Create a streamer for token-by-token output
 streamer = TextIteratorStreamer(tokenizer, skip_prompt=skip_prompt)
