@@ -1,6 +1,4 @@
 import asyncio
-# from src.logger import log
-import logging
 import os
 import re
 from threading import Thread
@@ -11,9 +9,10 @@ from langchain.callbacks.manager import CallbackManagerForLLMRun
 from langchain.llms.base import LLM
 from langchain.schema.messages import AIMessage, BaseMessage
 from langchain_core.language_models import LanguageModelInput
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer
 
+import logging
 log = logging.getLogger(__name__)
 
 
@@ -117,6 +116,7 @@ class TransformersModel(LLM):
             elif isinstance(message, ToolMessage):
                 formatted_messages.append({"role": "tool", "content": message.content})
 
+        # noinspection PyUnresolvedReferences
         return self.tokenizer.apply_chat_template(
             formatted_messages,
             tokenize=False,
@@ -130,12 +130,12 @@ class TransformersModel(LLM):
             **kwargs: Any,
     ) -> Tuple[TextIteratorStreamer, Thread, str]:
         """Shared implementation for streaming generation used by both _call and stream methods.
-        
+
         Args:
             prompt: The prompt to send to the model.
             run_manager: Callback manager for LLM.
             **kwargs: Additional arguments to pass to generation.
-            
+
         Returns:
             A tuple containing (streamer, thread, eos_token) for the caller to use.
         """
@@ -177,13 +177,13 @@ class TransformersModel(LLM):
             **kwargs: Any,
     ) -> Iterator[str]:
         """Stream the tokens of the response as they are generated.
-        
+
         Args:
             input: Either a string prompt or a list of messages.
             stop: A list of strings to stop generation when encountered.
             run_manager: Callback manager for LLM.
             **kwargs: Additional arguments to pass to call.
-            
+
         Yields:
             The token strings as they are generated.
         """
@@ -235,12 +235,12 @@ class TransformersModel(LLM):
             **kwargs: Any,
     ) -> AsyncIterator[str]:
         """Asynchronous version of streaming text generation.
-        
+
         Args:
             prompt: The prompt to send to the model.
             run_manager: Callback manager for LLM.
             **kwargs: Additional arguments to pass to generation.
-            
+
         Yields:
             The token strings as they are generated.
         """
@@ -289,13 +289,13 @@ class TransformersModel(LLM):
             **kwargs: Any,
     ) -> AsyncIterator[str]:
         """Asynchronously stream the tokens of the response as they are generated.
-        
+
         Args:
             input: Either a string prompt or a list of messages.
             stop: A list of strings to stop generation when encountered.
             run_manager: Callback manager for LLM.
             **kwargs: Additional arguments to pass to call.
-            
+
         Yields:
             The token strings as they are generated.
         """
@@ -309,7 +309,6 @@ class TransformersModel(LLM):
 
 # Example usage
 if __name__ == "__main__":
-    from langchain.schema import HumanMessage, SystemMessage
     from langchain.callbacks import StreamingStdOutCallbackHandler
 
     # Initialize the model
