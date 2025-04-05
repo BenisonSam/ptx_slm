@@ -6,3 +6,5 @@ src/
 clean_text.py
 install*.py
 test_model.py
+models/
+aquifer_data/
