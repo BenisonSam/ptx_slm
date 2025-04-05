@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import re
+from concurrent.futures import Future
 from threading import Thread
 from typing import Any, Dict, List, Tuple, Optional, Iterator, AsyncIterator
 
@@ -128,7 +129,7 @@ class TransformersModel(LLM):
             prompt: str,
             run_manager: Optional[CallbackManagerForLLMRun] = None,
             **kwargs: Any,
-    ) -> Tuple[TextIteratorStreamer, Thread, str, List[Exception]]:
+    ) -> Tuple[TextIteratorStreamer, Thread, str, Future]:
         """Shared implementation for streaming generation used by both _call and stream methods.
 
         Args:
@@ -137,7 +138,7 @@ class TransformersModel(LLM):
             **kwargs: Additional arguments to pass to generation.
 
         Returns:
-            A tuple containing (streamer, thread, eos_token, thread_exceptions) for the caller to use.
+            A tuple containing (streamer, thread, eos_token, future) for the caller to use.
         """
         # Create inputs - ensure input is a string
         if not isinstance(prompt, str):
@@ -162,16 +163,17 @@ class TransformersModel(LLM):
             **kwargs,
         }
 
-        # List to store exceptions that might occur in the thread
-        thread_exceptions = []
+        # Create a Future to store the result or exception
+        future = Future()
 
         # Wrap the model.generate call to capture exceptions
         def generate_with_exception_handling():
             try:
                 # noinspection PyUnresolvedReferences
-                self.model.generate(**generation_kwargs)
+                result = self.model.generate(**generation_kwargs)
+                future.set_result(result)
             except Exception as e:
-                thread_exceptions.append(e)
+                future.set_exception(e)
                 # Signal the streamer to stop if possible
                 # noinspection PyBroadException
                 try:
@@ -183,7 +185,7 @@ class TransformersModel(LLM):
         thread = Thread(target=generate_with_exception_handling)
         thread.start()
 
-        return streamer, thread, eos_token, thread_exceptions
+        return streamer, thread, eos_token, future
 
     def stream(
             self,
@@ -208,15 +210,15 @@ class TransformersModel(LLM):
         prompt = self._convert_messages_to_text(prompt.to_messages())
 
         # Get stream components
-        streamer, thread, eos_token, thread_exceptions = self._stream_generate(prompt, run_manager, **kwargs)
+        streamer, thread, eos_token, future = self._stream_generate(prompt, run_manager, **kwargs)
 
         # Stream the output
         for new_text in streamer:
             # Check for exceptions before yielding
-            if thread_exceptions:
+            if future.done() and future.exception() is not None:
                 thread.join()
-                raise thread_exceptions[0]
-
+                raise future.exception()
+                
             if new_text.endswith(eos_token):
                 new_text = new_text[:-len(eos_token)]
             if new_text != eos_token:
@@ -225,10 +227,10 @@ class TransformersModel(LLM):
                 yield new_text
 
         thread.join()
-
+        
         # Check for exceptions after thread completes
-        if thread_exceptions:
-            raise thread_exceptions[0]
+        if future.done() and future.exception() is not None:
+            raise future.exception()
 
     def _call(
             self,
@@ -238,16 +240,16 @@ class TransformersModel(LLM):
             **kwargs: Any,
     ) -> str:
         # Get stream components
-        streamer, thread, eos_token, thread_exceptions = self._stream_generate(prompt, run_manager, **kwargs)
+        streamer, thread, eos_token, future = self._stream_generate(prompt, run_manager, **kwargs)
 
         # Process the streamed output
         generated_text = ""
         for new_text in streamer:
             # Check for exceptions before processing text
-            if thread_exceptions:
+            if future.done() and future.exception() is not None:
                 thread.join()
-                raise thread_exceptions[0]
-
+                raise future.exception()
+                
             if new_text.endswith(eos_token):
                 new_text = new_text[:-len(eos_token)]
             if new_text != eos_token:
@@ -256,11 +258,11 @@ class TransformersModel(LLM):
                 generated_text += new_text
 
         thread.join()
-
+        
         # Check for exceptions after thread completes
-        if thread_exceptions:
-            raise thread_exceptions[0]
-
+        if future.done() and future.exception() is not None:
+            raise future.exception()
+            
         return generated_text
 
     async def _astream_generate(
@@ -285,14 +287,14 @@ class TransformersModel(LLM):
         # Create a function that will put data into the queue
         def threaded_generation():
             try:
-                streamer, thread, eos_token, thread_exceptions = self._stream_generate(prompt, run_manager, **kwargs)
+                streamer, thread, eos_token, future = self._stream_generate(prompt, run_manager, **kwargs)
 
                 for new_text in streamer:
                     # Check for exceptions in the generation thread
-                    if thread_exceptions:
-                        asyncio.run_coroutine_threadsafe(queue.put(thread_exceptions[0]), loop)
+                    if future.done() and future.exception() is not None:
+                        asyncio.run_coroutine_threadsafe(queue.put(future.exception()), loop)
                         break
-
+                        
                     if new_text.endswith(eos_token):
                         new_text = new_text[:-len(eos_token)]
                     if new_text != eos_token:
@@ -301,10 +303,10 @@ class TransformersModel(LLM):
                         asyncio.run_coroutine_threadsafe(queue.put(new_text), loop)
 
                 thread.join()
-
+                
                 # Check for exceptions after thread completes
-                if thread_exceptions:
-                    asyncio.run_coroutine_threadsafe(queue.put(thread_exceptions[0]), loop)
+                if future.done() and future.exception() is not None:
+                    asyncio.run_coroutine_threadsafe(queue.put(future.exception()), loop)
                 else:
                     # Signal we're done
                     asyncio.run_coroutine_threadsafe(queue.put(None), loop)
