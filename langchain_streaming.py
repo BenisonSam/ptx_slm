@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Iterator, Tuple
 import os
 import re
 import torch
@@ -12,7 +12,7 @@ class StreamingTransformersModel(LLM):
     """A LangChain LLM implementation that streams responses from a HuggingFace model."""
     
     model_name: str  # Required field
-    cache_dir: Optional[str] = None
+    model_path: Optional[str] = None
     device: str = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     model: Optional[AutoModelForCausalLM] = None
@@ -37,7 +37,7 @@ class StreamingTransformersModel(LLM):
     def __init__(
         self,
         model_name: str,
-        cache_dir: Optional[str] = None,
+        model_path: Optional[str] = None,
         model_kwargs: Optional[Dict[str, Any]] = None,
         generation_kwargs: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
@@ -45,7 +45,7 @@ class StreamingTransformersModel(LLM):
         super().__init__(model_name=model_name, **kwargs)
 
         self.model_name = model_name
-        self.cache_dir = cache_dir or os.path.join("models", re.sub(r'[^a-zA-Z0-9\-/]', '_', model_name))
+        self.model_path = model_path or os.path.join("models", re.sub(r'[^a-zA-Z0-9\-/]', '_', model_name))
         self.model_kwargs = {**self.model_kwargs, **(model_kwargs or {})}
         self.generation_kwargs = {**self.generation_kwargs, **(generation_kwargs or {})}
         self._initialize_model()
@@ -56,19 +56,36 @@ class StreamingTransformersModel(LLM):
             self.model_kwargs["torch_dtype"] = torch.float32
             self.model_kwargs["device_map"] = None
             
-        # Create cache directory if needed
-        os.makedirs(self.cache_dir, exist_ok=True)
+        # # Create cache directory if needed
+        # os.makedirs(self.model_path, exist_ok=True)
         
-        # Load or download model and tokenizer
+        # # Load or download model and tokenizer
+        # self.model = AutoModelForCausalLM.from_pretrained(
+        #     self.model_name,
+        #     cache_dir=self.model_path,
+        #     **self.model_kwargs
+        # )
+        # self.tokenizer = AutoTokenizer.from_pretrained(
+        #     self.model_name,
+        #     cache_dir=self.model_path
+        # )
+
+        # Download and save model if it doesn't exist
+        get_model = not os.path.exists(self.model_path)
+
+        # Create models directory if it doesn't exist
+        os.makedirs(self.model_path, exist_ok=True)
+
+        print(f"{'Downl' if get_model else 'L'}oading model {'to' if get_model else 'from'} {self.model_path}...")
         self.model = AutoModelForCausalLM.from_pretrained(
-            self.model_name,
-            cache_dir=self.cache_dir,
-            **self.model_kwargs
+            self.model_name if get_model else self.model_path,
+            **self.model_kwargs,
         )
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            self.model_name,
-            cache_dir=self.cache_dir
-        )
+
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name if get_model else self.model_path)
+        if get_model:
+            self.model.save_pretrained(self.model_path)
+            self.tokenizer.save_pretrained(self.model_path)
     
     @property
     def _llm_type(self) -> str:
@@ -91,13 +108,22 @@ class StreamingTransformersModel(LLM):
             add_generation_prompt=True
         )
     
-    def _call(
+    def _stream_generate(
         self,
         prompt: str,
-        stop: Optional[List[str]] = None,
         run_manager: Optional[CallbackManagerForLLMRun] = None,
         **kwargs: Any,
-    ) -> str:
+    ) -> Tuple[TextIteratorStreamer, Thread, str]:
+        """Shared implementation for streaming generation used by both _call and stream methods.
+        
+        Args:
+            prompt: The prompt to send to the model.
+            run_manager: Callback manager for LLM.
+            **kwargs: Additional arguments to pass to generation.
+            
+        Returns:
+            A tuple containing (streamer, thread, eos_token) for the caller to use.
+        """
         # Create inputs
         model_inputs = self.tokenizer([prompt], return_tensors="pt").to(self.device)
         
@@ -112,11 +138,62 @@ class StreamingTransformersModel(LLM):
             **model_inputs,
             "streamer": streamer,
             **self.generation_kwargs,
+            **kwargs,
         }
         
         # Start generation in a separate thread
         thread = Thread(target=self.model.generate, kwargs=generation_kwargs)
         thread.start()
+        
+        return streamer, thread, eos_token
+    
+    def stream(
+        self,
+        input: str | List[BaseMessage],
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> Iterator[str]:
+        """Stream the tokens of the response as they are generated.
+        
+        Args:
+            input: Either a string prompt or a list of messages.
+            stop: A list of strings to stop generation when encountered.
+            run_manager: Callback manager for LLM.
+            **kwargs: Additional arguments to pass to call.
+            
+        Yields:
+            The token strings as they are generated.
+        """
+        # Convert messages to text if input is a list of messages
+        if isinstance(input, list) and all(isinstance(x, BaseMessage) for x in input):
+            prompt = self._convert_messages_to_text(input)
+        else:
+            prompt = input
+        
+        # Get stream components
+        streamer, thread, eos_token = self._stream_generate(prompt, run_manager, **kwargs)
+        
+        # Stream the output
+        for new_text in streamer:
+            if new_text.endswith(eos_token):
+                new_text = new_text[:-len(eos_token)]
+            if new_text != eos_token:
+                if run_manager:
+                    run_manager.on_llm_new_token(new_text)
+                yield new_text
+        
+        thread.join()
+    
+    def _call(
+        self,
+        prompt: str,
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> str:
+        # Get stream components
+        streamer, thread, eos_token = self._stream_generate(prompt, run_manager, **kwargs)
         
         # Process the streamed output
         generated_text = ""
@@ -138,7 +215,10 @@ if __name__ == "__main__":
     
     # Initialize the model
     model = StreamingTransformersModel(
-        model_name="Qwen/Qwen2.5-1.5B-Instruct",
+        # model_name="Qwen/Qwen2.5-0.5B-Instruct",
+        # model_name="Qwen/Qwen2.5-1.5B-Instruct",
+        # model_name="deepseek-ai/deepseek-coder-1.3b-instruct",
+        model_name="microsoft/DialoGPT-large",
     )
     
     # Example messages
@@ -151,11 +231,22 @@ if __name__ == "__main__":
         HumanMessage(content="What is the role of textual criticism?"),
     ]
     
+    print("\n--- Example 1: Using callbacks for streaming ---")
     # Convert messages to text
     prompt = model._convert_messages_to_text(messages)
     
-    # Generate with streaming
+    # Generate with callbacks streaming
     response = model(
         prompt,
         callbacks=[StreamingStdOutCallbackHandler()]
     )
+    print(f"\nFull response: {response}")
+    
+    print("\n--- Example 2: Using custom stream method ---")
+    # Use our custom streaming method
+    full_response = ""
+    for chunk in model.stream(messages):
+        print(chunk, end="", flush=True)
+        full_response += chunk
+    
+    print(f"\nFull response: {full_response}")
