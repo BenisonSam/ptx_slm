@@ -7,21 +7,45 @@ from threading import Thread
 
 # Configuration
 PERFORMANCE_MODE = True  # Set to True for maximum performance, False for memory optimization
-model_name = "Qwen/Qwen2.5-0.5B-Instruct"
+# model_name = "Qwen/Qwen2.5-0.5B-Instruct"
+model_name = "Qwen/Qwen2.5-1.5B-Instruct"
+# model_name = "deepseek-ai/deepseek-coder-1.3b-instruct"
+# model_name = "microsoft/DialoGPT-large"
+
+# Determine device
+device = torch.device("cuda" if PERFORMANCE_MODE and torch.cuda.is_available() else "cpu")
 
 # Create a directory name from the model name (replacing / with _)
 model_dir = os.path.join("models", re.sub(r'[^a-zA-Z0-9\-/]', '_', model_name))
 model_dir = os.path.abspath(model_dir)
 
+# Check if model files exist
+model_path = os.path.join(model_dir)
+
+# Determine device and optimization settings based on performance mode
+performance_mode = PERFORMANCE_MODE
+device = "cuda" if performance_mode and torch.cuda.is_available() else "cpu"
+print(f"Device set to use {device}")
+
+# Download and save model if it doesn't exist
+should_download = not os.path.exists(model_path)
+
 # Create models directory if it doesn't exist
 os.makedirs(model_dir, exist_ok=True)
 
-# Check if model files exist
-model_path = os.path.join(model_dir, "model")
-tokenizer_path = os.path.join(model_dir, "tokenizer")
+print(f"{'Downl' if should_download else 'L'}oading model {'to' if should_download else 'from'} {model_path}...")
+model = AutoModelForCausalLM.from_pretrained(
+    model_name if should_download else model_path,
+    torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+    device_map="auto" if device == "cuda" else None,
+    low_cpu_mem_usage=True,
+)
 
-# Determine device
-device = torch.device("cuda" if PERFORMANCE_MODE and torch.cuda.is_available() else "cpu")
+tokenizer = AutoTokenizer.from_pretrained(model_name if should_download else model_path)
+if should_download:
+    model.save_pretrained(model_path)
+    tokenizer.save_pretrained(model_path)
+
 
 # Default model kwargs and generation kwargs
 model_kwargs = {
@@ -47,34 +71,7 @@ else:
     model_kwargs["torch_dtype"] = torch.float32  # Use float32 for CPU
     model_kwargs["device_map"] = None  # Disable device_map for CPU
 
-# Download and save model if it doesn't exist
-if not os.path.exists(model_path):
-    print(f"Downloading model to {model_path}...")
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        **model_kwargs
-    )
-    if device.type == "cpu":
-        model = model.to(device)
-    model.save_pretrained(model_path)
-else:
-    print(f"Loading model from {model_path}...")
-    model = AutoModelForCausalLM.from_pretrained(
-        model_path,
-        **model_kwargs
-    )
-    if device.type == "cpu":
-        model = model.to(device)
-
-# Download and save tokenizer if it doesn't exist
-if not os.path.exists(tokenizer_path):
-    print(f"Downloading tokenizer to {tokenizer_path}...")
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    tokenizer.save_pretrained(tokenizer_path)
-else:
-    print(f"Loading tokenizer from {tokenizer_path}...")
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
-
+# Prompt and messages
 prompt = "What is the role of textual criticism?"
 messages = [
     {"role": "system", "content": "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."},
@@ -82,7 +79,7 @@ messages = [
     {"role": "assistant", "content": "Textual criticism is the study of manuscripts and their variations to determine the most accurate version of a text. It's particularly important in biblical studies."},
     {"role": "user", "content": "What are its main goals?"},
     {"role": "assistant", "content": "The main goals of textual criticism are to identify and correct errors in texts, reconstruct the original text, and understand the history of its transmission."},
-    {"role": "user", "content": "Name me some of the most important textual critics."},
+    {"role": "user", "content": prompt},
 ]
 text = tokenizer.apply_chat_template(
     messages,
