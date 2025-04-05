@@ -1,7 +1,8 @@
-from typing import Any, Dict, List, Optional, Iterator, Tuple
+from typing import Any, Dict, List, Optional, Iterator, Tuple, AsyncIterator
 import os
 import re
 import torch
+import asyncio
 from threading import Thread
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer
 from langchain.callbacks.manager import CallbackManagerForLLMRun
@@ -208,6 +209,86 @@ class StreamingTransformersModel(LLM):
         thread.join()
         return generated_text
 
+    async def _astream_generate(
+        self,
+        prompt: str,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[str]:
+        """Asynchronous version of streaming text generation.
+        
+        Args:
+            prompt: The prompt to send to the model.
+            run_manager: Callback manager for LLM.
+            **kwargs: Additional arguments to pass to generation.
+            
+        Yields:
+            The token strings as they are generated.
+        """
+        # Create a queue to transfer data from the synchronous thread to the async context
+        queue = asyncio.Queue()
+        
+        # Create a function that will put data into the queue
+        def threaded_generation():
+            try:
+                streamer, thread, eos_token = self._stream_generate(prompt, run_manager, **kwargs)
+                
+                for new_text in streamer:
+                    if new_text.endswith(eos_token):
+                        new_text = new_text[:-len(eos_token)]
+                    if new_text != eos_token:
+                        if run_manager:
+                            run_manager.on_llm_new_token(new_text)
+                        asyncio.run_coroutine_threadsafe(queue.put(new_text), loop)
+                
+                thread.join()
+                # Signal we're done
+                asyncio.run_coroutine_threadsafe(queue.put(None), loop)
+            except Exception as e:
+                asyncio.run_coroutine_threadsafe(queue.put(e), loop)
+        
+        # Get the event loop
+        loop = asyncio.get_event_loop()
+        
+        # Start the generation thread
+        Thread(target=threaded_generation).start()
+        
+        # Yield items from the queue as they become available
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
+            if isinstance(item, Exception):
+                raise item
+            yield item
+    
+    async def astream(
+        self,
+        input: str | List[BaseMessage],
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[str]:
+        """Asynchronously stream the tokens of the response as they are generated.
+        
+        Args:
+            input: Either a string prompt or a list of messages.
+            stop: A list of strings to stop generation when encountered.
+            run_manager: Callback manager for LLM.
+            **kwargs: Additional arguments to pass to call.
+            
+        Yields:
+            The token strings as they are generated.
+        """
+        # Convert messages to text if input is a list of messages
+        if isinstance(input, list) and all(isinstance(x, BaseMessage) for x in input):
+            prompt = self._convert_messages_to_text(input)
+        else:
+            prompt = input
+        
+        async for token in self._astream_generate(prompt, run_manager, **kwargs):
+            yield token
+
 # Example usage
 if __name__ == "__main__":
     from langchain.schema import HumanMessage, SystemMessage
@@ -215,10 +296,10 @@ if __name__ == "__main__":
     
     # Initialize the model
     model = StreamingTransformersModel(
-        # model_name="Qwen/Qwen2.5-0.5B-Instruct",
+        model_name="Qwen/Qwen2.5-0.5B-Instruct",
         # model_name="Qwen/Qwen2.5-1.5B-Instruct",
         # model_name="deepseek-ai/deepseek-coder-1.3b-instruct",
-        model_name="microsoft/DialoGPT-large",
+        # model_name="microsoft/DialoGPT-large",
     )
     
     # Example messages
@@ -240,7 +321,6 @@ if __name__ == "__main__":
         prompt,
         callbacks=[StreamingStdOutCallbackHandler()]
     )
-    print(f"\nFull response: {response}")
     
     print("\n--- Example 2: Using custom stream method ---")
     # Use our custom streaming method
@@ -249,4 +329,14 @@ if __name__ == "__main__":
         print(chunk, end="", flush=True)
         full_response += chunk
     
-    print(f"\nFull response: {full_response}")
+    # Example 3: Async streaming
+    print("\n--- Example 3: Using astream method ---")
+    
+    async def run_async_example():
+        full_response = ""
+        async for chunk in model.astream(messages):
+            print(chunk, end="", flush=True)
+            full_response += chunk
+    
+    # Run the async example
+    asyncio.run(run_async_example())
